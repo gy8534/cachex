@@ -1,17 +1,17 @@
 import java.time.Duration;
-import java.util.Comparator;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.PriorityQueue;
+import java.util.*;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 public class Cachex<K, V> {
     private final int capacity;
     private final Duration defaultTTL;
 
     private final Map<K, Node<K, V>> map;
-    private final PriorityQueue<Node<K, V>> expiryOrder;
+    private final TreeSet<Node<K, V>> expiryOrder;
     private final  Node<K, V> head;
     private final  Node<K, V> tail;
+    private final AtomicLong seqIdGenerator;
 
     public Cachex(int capacity) {
         this(capacity, Duration.ofMinutes(10));
@@ -29,11 +29,12 @@ public class Cachex<K, V> {
         this.defaultTTL = ttl;
         this.capacity = capacity;
         map = new HashMap<>();
-        expiryOrder = new PriorityQueue<>(Comparator.comparingLong(node -> node.expiresAt));
-        head = new Node<>(null, null, 0);
-        tail = new Node<>(null, null, 0);
+        expiryOrder = new TreeSet<>(Comparator.<Node<K, V>>comparingLong(node -> node.expiresAt).thenComparingLong(node -> node.seqId));
+        head = new Node<>(null, null, 0, -1);
+        tail = new Node<>(null, null, 0, -2);
         head.next = tail;
         tail.prev = head;
+        seqIdGenerator = new AtomicLong(0);
     }
 
     public void put(K key, V val) {
@@ -54,19 +55,19 @@ public class Cachex<K, V> {
             node.value = val;
             expiryOrder.remove(node);
             node.expiresAt = expiresAt;
-            expiryOrder.offer(node);
+            expiryOrder.add(node);
             moveToFront(node);
             return;
         }
 
-        Node<K, V> newNode = new Node<>(key, val, expiresAt);
-        map.put(key, newNode);
-        expiryOrder.offer(newNode);
-        addFirst(newNode);
-
-        if (map.size() > capacity) {
+        if (map.size() >= capacity) {
             removeLast();
         }
+
+        Node<K, V> newNode = new Node<>(key, val, expiresAt, seqIdGenerator.getAndIncrement());
+        map.put(key, newNode);
+        expiryOrder.add(newNode);
+        addFirst(newNode);
     }
 
     public V get(K key) {
@@ -157,8 +158,8 @@ public class Cachex<K, V> {
     }
 
     private void evictExpired() {
-        while(!expiryOrder.isEmpty() && expiryOrder.peek().expiresAt <= now()) {
-            Node<K, V> node = expiryOrder.poll();
+        while(!expiryOrder.isEmpty() && expiryOrder.first().expiresAt <= now()) {
+            Node<K, V> node = expiryOrder.removeFirst();
 
             if (node != null) {
                 map.remove(node.key);
@@ -171,14 +172,16 @@ public class Cachex<K, V> {
         private final K key;
         private V value;
         private long expiresAt;
+        private final long seqId;
 
         private Node<K, V> prev;
         private Node<K, V> next;
 
-        public Node(K key, V value, long expiresAt) {
+        public Node(K key, V value, long expiresAt, long seqId) {
             this.key = key;
             this.value = value;
             this.expiresAt = expiresAt;
+            this.seqId = seqId;
         }
     }
 
